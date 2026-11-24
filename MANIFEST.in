@@ -1,0 +1,9 @@
+global-exclude *
+include LICENSE README.md RELEASE.md pyproject.toml MANIFEST.in .gitignore
+include .github/workflows/ci.yml
+include examples/sensor-guide.csv examples/sensor-guide.xliff
+include tools/check_dist.py tests/test_cli.py
+include src/babelbee_qa/__init__.py src/babelbee_qa/cli.py src/babelbee_qa/direction.py
+include src/babelbee_qa/evidence_rules.py src/babelbee_qa/inputs.py src/babelbee_qa/provider.py
+include src/babelbee_qa/register.py src/babelbee_qa/reports.py src/babelbee_qa/review.py
+include src/babelbee_qa/terminology.py
