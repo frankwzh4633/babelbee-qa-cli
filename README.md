@@ -2,22 +2,24 @@
 
 A standalone command-line tool for checking an existing translation using your own model account. It generates HTML and Excel reports with findings, evidence, and terminology coverage.
 
-## Install locally
+## Quick start
 
-Use Python 3.10 through 3.14. From the extracted source archive or standalone checkout, create a virtual environment and install the package.
+[Download BabelBee QA CLI v0.1.1](https://github.com/frankwzh4633/babelbee-qa-cli/releases/tag/v0.1.1) for Python 3.10–3.14. On macOS or Linux, install the wheel in a virtual environment:
 
 ```sh
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install .
+python -m pip install https://github.com/frankwzh4633/babelbee-qa-cli/releases/download/v0.1.1/babelbee_qa-0.1.1-py3-none-any.whl
 babelbee-qa --help
 ```
 
-On Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1`. If you have the wheel, pass its local path to `python -m pip install` in place of `.`. The [Examples](examples) directory is in the source archive.
+On Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1`. Then run the same install and help commands.
+
+For a source install, extract the source archive from the release page or clone this repository, then run `python -m pip install .` from its root. The [examples](examples) are included in the source archive and checkout.
 
 ## Run a review
 
-Use a model that offers an OpenAI-compatible `/chat/completions` endpoint, returns JSON reliably, and can read your entire bilingual file in one request. Set the base URL up to and including `/v1` where applicable. Keep the key in your shell environment. In Bash you can enter it without putting it into command history.
+Use a model that offers an OpenAI-compatible `/chat/completions` endpoint, returns JSON reliably, and can read your entire bilingual file in one request. Set the base URL up to and including `/v1` where applicable. Keep the key in your shell environment. In Bash you can enter it without putting it into command history. Run the examples below from the extracted source archive or checkout.
 
 ```bash
 read -r -s -p 'Model API key: ' BABELBEE_QA_API_KEY
