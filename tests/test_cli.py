@@ -261,16 +261,14 @@ def test_invalid_input_and_truncation_do_not_create_report(tmp_path):
     assert not (tmp_path / 'project-qa').exists()
 
 
-@pytest.mark.parametrize('kind', ['bad_evidence', 'missing_segment', 'bad_related'])
+@pytest.mark.parametrize('kind', ['bad_evidence', 'missing_segment'])
 def test_model_cannot_silently_report_invalid_findings(tmp_path, kind):
     path = tmp_path / 'project.csv'
     _write(path, [('Hello', '你好'), ('World', '世界')])
 
     def bad_response(data):
         if 'document_context' not in data:
-            invalid_term = finding('SEG-001', 'terminology', 'Hello', '你好',
-                                   related_id='SEG-002', related_source_quote='World', related_target_quote='虚构')
-            return response({'context': 'A greeting.', 'findings': [invalid_term] if kind == 'bad_related' else []})
+            return response({'context': 'A greeting.', 'findings': []})
         return response({'reviewed_ids': ['SEG-001'] if kind == 'missing_segment' else ['SEG-001', 'SEG-002'],
                          'findings': [finding('SEG-001', 'accuracy', 'invented', '你好')]})
 
@@ -278,6 +276,45 @@ def test_model_cannot_silently_report_invalid_findings(tmp_path, kind):
         result = run_cli(path, url)
     assert result.returncode == 1
     assert not (tmp_path / 'project-qa').exists()
+
+
+@pytest.mark.parametrize('language', ['zh', 'en'])
+def test_bad_document_comparisons_are_counted_without_blocking_batch_review(tmp_path, language):
+    path = tmp_path / 'comparisons.sdlxliff'
+    _write(path, [('Inspect the pressure\u00a0sensor.', '检查压力传感器。'),
+                  ('Calibrate the pressure\u00a0sensor.', '校准压力计。'),
+                  ('Wait 15 minutes.', '等待 5 分钟。')])
+
+    def stub(data):
+        if data.get('task') == 'document_overview':
+            valid = finding('SEG-002', 'terminology', 'pressure sensor', '压力计',
+                            related_id='SEG-001', related_source_quote='pressure sensor',
+                            related_target_quote='压力传感器', error_segment_id='SEG-002')
+            invalid = [dict(valid, related_id='SEG-002'), dict(valid, related_target_quote='不存在的引文'),
+                       dict(valid, source_quote='invented evidence'), None]
+            return response({'context': 'A maintenance guide.', 'findings': [invalid[0], valid, *invalid[1:]],
+                             'terminology_coverage': []})
+        issue = finding('SEG-003', 'accuracy', '15 minutes', '5 分钟')
+        return response({'reviewed_ids': data['review_ids'], 'findings': [issue]})
+
+    with endpoint(stub) as (url, requests):
+        completed = run_cli(path, url, '--report-language', language)
+    assert completed.returncode == 0, completed.stderr
+    assert [data.get('task', 'batch') for *_, data in requests] == ['document_overview', 'batch']
+    folder = tmp_path / 'comparisons-qa'
+    text = ('全文术语对照中有 4 条未通过校验，已剔除。' if language == 'zh' else
+            'Rejected document-wide terminology comparisons: 4 (failed validation).')
+    assert text in (folder / 'report.html').read_text(encoding='utf-8')
+    workbook = load_workbook(folder / 'report.xlsx', read_only=True, data_only=True)
+    try:
+        summary, issues, label = (('摘要', '问题清单', '术语检查覆盖提示') if language == 'zh' else
+                                  ('Summary', 'Findings', 'Terminology check coverage'))
+        assert text in dict(workbook[summary].values)[label]
+        rows = list(workbook[issues].values)[1:]
+        assert [(r[0], r[4], r[6]) for r in rows] == [('SEG-002', 'pressure\u00a0sensor', 'SEG-001'),
+                                                       ('SEG-003', '15 minutes', None)]
+    finally:
+        workbook.close()
 
 
 def test_provider_does_not_follow_redirect_or_print_provider_response(tmp_path):
@@ -693,6 +730,45 @@ def test_incomplete_full_document_receipt_never_creates_reports(tmp_path):
     assert result.returncode == 1 and 'receipt' in result.stderr
     assert len(requests) == 2
     assert not (tmp_path / 'no-full-read-qa').exists()
+
+
+@pytest.mark.parametrize('invalid', [None, 'receipt', 'source_quote', 'target_quote'])
+def test_sdl_no_break_spaces_in_receipts_and_evidence(tmp_path, invalid):
+    path = tmp_path / 'bus-route.sdlxliff'
+    source = 'Transfer to\u00a0Line 52.'
+    target = '换乘\u00a051 路。'
+    _write(path, [(source, target)])
+
+    def stub(data):
+        if data.get('task') == 'document_overview':
+            excerpt = 'Transfer to Line 51.' if invalid == 'receipt' else 'Transfer to Line 52.'
+            return response({'context': 'A bus route guide.', 'receipt': [['SEG-001', excerpt]],
+                             'findings': [], 'terminology_coverage': []})
+        source_quote = 'to Line 52!' if invalid == 'source_quote' else 'to Line 52.'
+        target_quote = '换乘 59 路' if invalid == 'target_quote' else '换乘 51 路'
+        return response({'reviewed_ids': data['review_ids'], 'findings': [
+            finding('SEG-001', 'accuracy', source_quote, target_quote, explanation='The bus number changed.')]})
+
+    with endpoint(stub) as (url, requests):
+        result = run_cli(path, url, '--report-language', 'zh')
+    folder = tmp_path / 'bus-route-qa'
+    if invalid:
+        assert result.returncode == 1
+        assert ('exact source excerpts' if invalid == 'receipt' else 'does not match') in result.stderr
+        assert sum(bool(data.get('validation_retry')) for *_, data in requests) == 1
+        assert not folder.exists()
+        return
+
+    assert result.returncode == 0, result.stderr
+    assert len(requests) == 2 and all(not data.get('validation_retry') for *_, data in requests)
+    html = (folder / 'report.html').read_text(encoding='utf-8')
+    assert '<td>to\u00a0Line 52.</td>' in html and '<td>换乘\u00a051 路</td>' in html
+    workbook = load_workbook(folder / 'report.xlsx', read_only=True, data_only=True)
+    try:
+        assert list(workbook['问题清单'].values)[1][4:6] == ('to\u00a0Line 52.', '换乘\u00a051 路')
+        assert list(workbook['句段'].values)[1][2:4] == (source, target)
+    finally:
+        workbook.close()
 
 
 def test_transient_failure_retries_only_the_affected_segment_batch(tmp_path):

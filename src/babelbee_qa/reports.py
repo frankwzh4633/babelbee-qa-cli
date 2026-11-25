@@ -104,6 +104,10 @@ def _coverage_notice(review):
                  'Of the recurring terms sampled initially, {compared} had evidence from two translations, '
                  '{limited} could not be reliably compared, and {unverified} did not pass evidence validation.')
         notice = count.format(compared=coverage.compared, limited=len(coverage.limitations), unverified=coverage.unverified)
+    if coverage.dropped_comparisons:
+        dropped = coverage.dropped_comparisons
+        notice += (f' 全文术语对照中有 {dropped} 条未通过校验，已剔除。' if zh else
+                   f' Rejected document-wide terminology comparisons: {dropped} (failed validation).')
     if coverage.expected_occurrences:
         verified, total, gaps = (len(coverage.verified_occurrences), len(coverage.expected_occurrences), len(coverage.gaps))
         scope = (f'所选术语的出现位置：已核验 {verified}/{total} 处，{gaps} 处待人工核实。' if zh else

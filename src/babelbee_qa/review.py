@@ -163,6 +163,7 @@ class TerminologyCoverage:
     verified_occurrences: tuple[tuple[str, str], ...] = ()
     expected_occurrences: tuple[tuple[str, str], ...] = ()
     gaps: tuple[tuple[str, str], ...] = ()
+    dropped_comparisons: int = 0
 
 
 @dataclass(frozen=True)
@@ -184,50 +185,74 @@ def _field(item, name, limit, *, required=False):
     return value
 
 
-def _findings(result, segments, *, origin='ai'):
+def _match_quote(text: str, quote: str) -> str | None:
+    """Match ordinary and no-break spaces while returning the original excerpt."""
+    if quote in text:
+        return quote
+    offset = text.replace('\u00a0', ' ').find(quote.replace('\u00a0', ' '))
+    if offset == -1:
+        return None
+    return text[offset:offset + len(quote)]
+
+
+def _finding_items(result, segments):
     items = result.get('findings')
     if not isinstance(items, list) or len(items) > min(500, 8 * len(segments)):
         raise QAError('Model output has an invalid findings list.')
-    for item in items:
-        if not isinstance(item, dict):
-            raise QAError('Model output contains an invalid finding.')
-        segment_id = _field(item, 'segment_id', 20, required=True)
-        category = _field(item, 'category', 30, required=True)
-        severity = _field(item, 'severity', 20, required=True)
-        explanation = _field(item, 'explanation', 3_000, required=True)
-        if segment_id not in segments or category not in CATEGORIES or severity not in SEVERITIES[:-1]:
-            raise QAError('Model output refers to an unknown segment, category or severity.')
-        segment = segments[segment_id]
-        if not segment.target.strip() and not segment.target_codes:
-            continue
-        source_quote = _field(item, 'source_quote', 1_000)
-        target_quote = _field(item, 'target_quote', 1_000)
-        suggestion = _field(item, 'suggestion', 12_000)
-        if not (source_quote.strip() or target_quote.strip()):
-            raise QAError('Model output contains a finding without evidence.')
-        if source_quote not in segment.source or target_quote not in segment.target:
-            raise QAError('Model output contains evidence that does not match the input segment.')
-        related_id = related_source = related_target = ''
-        if origin == 'source_check':
-            if category != 'accuracy' or not source_quote.strip() or not target_quote.strip():
-                raise QAError('Source-ending findings require exact source and target evidence.')
-            suggestion = ''
-        if origin == 'document':
-            related_id = _field(item, 'related_id', 20, required=True)
-            related_source = _field(item, 'related_source_quote', 1_000, required=True)
-            related_target = _field(item, 'related_target_quote', 1_000, required=True)
-            if (category != 'terminology' or related_id == segment_id or related_id not in segments
-                    or not source_quote.strip() or not target_quote.strip()
-                    or related_source not in segments[related_id].source
-                    or related_target not in segments[related_id].target
-                    or related_target.casefold() == target_quote.casefold()):
-                raise QAError('Model output did not provide a valid cross-segment terminology comparison.')
-        if origin == 'document' and item.get('error_segment_id') != segment_id:
-            severity = 'advisory'
-            suggestion = ''
-        yield Finding(segment_id, category, severity, explanation, source_quote, target_quote,
-                      suggestion, related_id, related_source, related_target, origin)
+    return items
 
+
+def _parse_finding(item, segments, origin):
+    if not isinstance(item, dict):
+        raise QAError('Model output contains an invalid finding.')
+    segment_id = _field(item, 'segment_id', 20, required=True)
+    category = _field(item, 'category', 30, required=True)
+    severity = _field(item, 'severity', 20, required=True)
+    explanation = _field(item, 'explanation', 3_000, required=True)
+    if segment_id not in segments or category not in CATEGORIES or severity not in SEVERITIES[:-1]:
+        raise QAError('Model output refers to an unknown segment, category or severity.')
+    segment = segments[segment_id]
+    if not segment.target.strip() and not segment.target_codes:
+        return None
+    source_quote = _field(item, 'source_quote', 1_000)
+    target_quote = _field(item, 'target_quote', 1_000)
+    suggestion = _field(item, 'suggestion', 12_000)
+    if not (source_quote.strip() or target_quote.strip()):
+        raise QAError('Model output contains a finding without evidence.')
+    source_quote = _match_quote(segment.source, source_quote)
+    target_quote = _match_quote(segment.target, target_quote)
+    if source_quote is None or target_quote is None:
+        raise QAError('Model output contains evidence that does not match the input segment.')
+    related_id = related_source = related_target = ''
+    if origin == 'source_check':
+        if category != 'accuracy' or not source_quote.strip() or not target_quote.strip():
+            raise QAError('Source-ending findings require exact source and target evidence.')
+        suggestion = ''
+    if origin == 'document':
+        related_id = _field(item, 'related_id', 20, required=True)
+        related_source = _field(item, 'related_source_quote', 1_000, required=True)
+        related_target = _field(item, 'related_target_quote', 1_000, required=True)
+        if (category != 'terminology' or related_id == segment_id or related_id not in segments
+                or not source_quote.strip() or not target_quote.strip()):
+            raise QAError('Model output did not provide a valid cross-segment terminology comparison.')
+        comparison = segments[related_id]
+        related_source = _match_quote(comparison.source, related_source)
+        related_target = _match_quote(comparison.target, related_target)
+        if (related_source is None or related_target is None
+                or related_target.replace('\u00a0', ' ').casefold() == target_quote.replace('\u00a0', ' ').casefold()):
+            raise QAError('Model output did not provide a valid cross-segment terminology comparison.')
+    if origin == 'document' and item.get('error_segment_id') != segment_id:
+        severity = 'advisory'
+        suggestion = ''
+    return Finding(segment_id, category, severity, explanation, source_quote, target_quote,
+                   suggestion, related_id, related_source, related_target, origin)
+
+
+def _findings(result, segments, *, origin='ai'):
+    for item in _finding_items(result, segments):
+        issue = _parse_finding(item, segments, origin)
+        if issue is not None:
+            yield issue
 
 def _terminology_coverage(result, segments):
     items = result.get('terminology_coverage')
@@ -309,14 +334,25 @@ def _overview_result(result, segments, anchors, retried):
             raise QAError('Full-document reading receipt has invalid segment IDs.')
         segment_id, excerpt = item
         source = segments[segment_id].source.strip()
-        if not excerpt.strip() or not min(8, len(source)) <= len(excerpt) <= 240 or excerpt not in source:
+        if not excerpt.strip() or not min(8, len(source)) <= len(excerpt) <= 240 or _match_quote(source, excerpt) is None:
             raise QAError('Full-document reading receipt needs exact source excerpts.')
         seen.add(segment_id)
     coverage = _terminology_coverage(result, segments)
     if not retried and coverage.unverified and not (coverage.compared or coverage.limitations):
         raise QAError('Terminology samples need exact phrases copied from source and target text.')
+    findings = []
+    dropped = 0
+    for item in _finding_items(result, segments):
+        try:
+            issue = _parse_finding(item, segments, 'document')
+        except QAError:
+            issue = None
+        if issue is None:
+            dropped += 1
+        else:
+            findings.append(issue)
     return (_field(result, 'context', 5_000, required=True),
-            coverage, list(_findings(result, segments, origin='document')))
+            replace(coverage, dropped_comparisons=dropped), findings)
 
 
 def _batch_result(result, current, index):
@@ -453,7 +489,8 @@ def _merge_coverage(overview, focused):
     return TerminologyCoverage(len(verified), tuple(limits.values()), overview.unverified + focused.unverified,
                                overview.reported or focused.reported, verified, focused.candidate_count,
                                tuple(sorted(set(overview.verified_occurrences) | set(focused.verified_occurrences))),
-                               tuple(sorted(set(overview.expected_occurrences) | set(focused.expected_occurrences))))
+                               tuple(sorted(set(overview.expected_occurrences) | set(focused.expected_occurrences))),
+                               dropped_comparisons=overview.dropped_comparisons)
 
 
 def _recheck_term_gaps(coverage, segments, provider, meta):
